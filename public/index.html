@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wriggle Multiplayer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: #14161C;
+    min-height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    font-family: Arial, sans-serif;
+    color: #E8ECF1;
+    overflow: hidden;
+  }
+  #wrap { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 16px; }
+  #hud { display: flex; justify-content: space-between; align-items: center; width: 640px; max-width: 100%; }
+  #hud .label { font-size: 11px; letter-spacing: 2px; color: #7A828F; }
+  #hud .value { font-size: 20px; font-weight: bold; color: #6FE0A8; }
+  #status { font-size: 11px; color: #7A828F; display: flex; align-items: center; gap: 6px; }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: #E85D5D; }
+  #dot.live { background: #6FE0A8; }
+  #stage { position: relative; }
+  canvas { background: #1B1E26; border-radius: 6px; display: block; cursor: crosshair; }
+  #overlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; background: rgba(15,17,22,0.92); border-radius: 6px; padding: 20px; text-align: center;
+  }
+  #overlay input {
+    background: #1E2530; border: 1px solid #333B48; color: #E8ECF1;
+    padding: 10px 14px; border-radius: 8px; font-size: 14px; width: 220px; text-align: center;
+  }
+  #overlay .title { font-size: 24px; font-weight: bold; color: #FF9B6B; }
+  #overlay .sub { font-size: 13px; opacity: 0.8; max-width: 380px; }
+  #joinBtn {
+    background: #6FE0A8; color: #0F1913; border: none; padding: 10px 26px;
+    border-radius: 22px; font-weight: bold; font-size: 15px; cursor: pointer;
+  }
+  #leaderboard {
+    position: absolute; top: 10px; right: 10px;
+    background: rgba(23,26,33,0.9); border: 1px solid #262B35;
+    border-radius: 8px; padding: 8px 10px; min-width: 130px; font-size: 12px;
+  }
+  #leaderboard .lbTitle { font-size: 10px; letter-spacing: 1px; color: #7A828F; margin-bottom: 4px; }
+  .row { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
+  .row.me { color: #6FE0A8; font-weight: bold; }
+  .swatch { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+  #msg { color: #7A828F; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    <div><div class="label">LENGTH</div><div class="value" id="lenVal">10</div></div>
+    <div id="status"><span id="dot"></span><span id="statusText">connecting…</span></div>
+  </div>
+  <div id="stage">
+    <canvas id="game" width="640" height="460"></canvas>
+    <div id="leaderboard"><div class="lbTitle">PLAYERS</div><div id="lbRows"></div></div>
+    <div id="overlay">
+      <div class="title">WRIGGLE</div>
+      <div class="sub">Real-time multiplayer. Steer with your mouse, click/hold to boost. Eat orbs to grow — avoid other players' bodies.</div>
+      <input id="nameInput" placeholder="Your name" maxlength="16">
+      <button id="joinBtn">JOIN GAME</button>
+    </div>
+  </div>
+  <div id="msg">MOUSE TO STEER &mdash; CLICK/HOLD TO BOOST</div>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const lenValEl = document.getElementById('lenVal');
+const statusText = document.getElementById('statusText');
+const dot = document.getElementById('dot');
+const overlay = document.getElementById('overlay');
+const joinBtn = document.getElementById('joinBtn');
+const nameInput = document.getElementById('nameInput');
+
+let ws = null;
+let myId = null;
+let world = { w: 2000, h: 1500 };
+let latestState = { players: [], food: [] };
+let mouseScreen = { x: W/2, y: H/2 };
+let boosting = false;
+let zoom = 1.2, camX = world.w/2, camY = world.h/2;
+let joined = false;
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  ws = new WebSocket(proto + location.host);
+
+  ws.onopen = () => {
+    statusText.textContent = 'connected';
+    dot.classList.add('live');
+  };
+  ws.onclose = () => {
+    statusText.textContent = 'disconnected — refresh to retry';
+    dot.classList.remove('live');
+  };
+  ws.onerror = () => {
+    statusText.textContent = 'connection error';
+  };
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'welcome') {
+      myId = msg.id;
+      world = msg.world;
+    } else if (msg.type === 'state') {
+      latestState = msg;
+    } else if (msg.type === 'dead') {
+      showGameOver(msg.length);
+    }
+  };
+}
+
+function join() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'join', name: nameInput.value || 'Player' }));
+  joined = true;
+  overlay.style.display = 'none';
+}
+
+function showGameOver(len) {
+  joined = false;
+  overlay.querySelector('.title').textContent = 'ELIMINATED — length ' + len;
+  overlay.querySelector('.sub').textContent = 'Press Rejoin to spawn back in.';
+  joinBtn.textContent = 'REJOIN';
+  overlay.style.display = 'flex';
+}
+
+joinBtn.addEventListener('click', () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (myId && !joined) {
+    ws.send(JSON.stringify({ type: 'respawn' }));
+    ws.send(JSON.stringify({ type: 'input', angle: 0, boost: false }));
+    joined = true;
+    overlay.style.display = 'none';
+  } else {
+    join();
+  }
+});
+
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  mouseScreen.x = (e.clientX-rect.left) * (W/rect.width);
+  mouseScreen.y = (e.clientY-rect.top) * (H/rect.height);
+});
+canvas.addEventListener('mousedown', () => boosting = true);
+canvas.addEventListener('mouseup', () => boosting = false);
+canvas.addEventListener('touchmove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const t = e.touches[0];
+  mouseScreen.x = (t.clientX-rect.left) * (W/rect.width);
+  mouseScreen.y = (t.clientY-rect.top) * (H/rect.height);
+}, { passive: true });
+
+function me() {
+  return latestState.players.find(p => p.id === myId);
+}
+
+function screenToWorld(sx, sy) {
+  return { x: (sx-W/2)/zoom + camX, y: (sy-H/2)/zoom + camY };
+}
+
+let lastSend = 0;
+function sendInput() {
+  const m = me();
+  if (!m || !m.alive || !joined) return;
+  const now = performance.now();
+  if (now - lastSend < 60) return;
+  lastSend = now;
+  const head = m.segs[0];
+  const worldPt = screenToWorld(mouseScreen.x, mouseScreen.y);
+  const angle = Math.atan2(worldPt.y - head[1], worldPt.x - head[0]);
+  ws.send(JSON.stringify({ type: 'input', angle, boost: boosting }));
+}
+
+function updateCamera() {
+  const m = me();
+  if (!m || !m.segs.length) return;
+  const head = m.segs[0];
+  camX += (head[0] - camX) * 0.08;
+  camY += (head[1] - camY) * 0.08;
+  const targetZoom = Math.max(0.5, Math.min(1.3, 1.35 - (m.segs.length - 10) * 0.01));
+  zoom += (targetZoom - zoom) * 0.05;
+}
+
+function drawWorm(segs, angle, color, len) {
+  const girth = Math.min(10, (len-10)*0.18);
+  const headR = 9+girth, bodyR = 8+girth;
+  for (let i = segs.length-1; i >= 0; i--) {
+    const [x, y] = segs[i];
+    const r = i === 0 ? headR : Math.max(5+girth*0.6, bodyR - i*0.2);
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
+  }
+  const [hx, hy] = segs[0];
+  const eyeOffset = 5+girth*0.4, eyeSize = 2.6+girth*0.15;
+  const e1x=hx+Math.cos(angle-0.5)*eyeOffset, e1y=hy+Math.sin(angle-0.5)*eyeOffset;
+  const e2x=hx+Math.cos(angle+0.5)*eyeOffset, e2y=hy+Math.sin(angle+0.5)*eyeOffset;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(e1x,e1y,eyeSize,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(e2x,e2y,eyeSize,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.arc(e1x,e1y,eyeSize*0.46,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(e2x,e2y,eyeSize*0.46,0,Math.PI*2); ctx.fill();
+}
+
+function draw() {
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle = '#1B1E26';
+  ctx.fillRect(0,0,W,H);
+
+  ctx.save();
+  ctx.translate(W/2,H/2);
+  ctx.scale(zoom,zoom);
+  ctx.translate(-camX,-camY);
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  ctx.lineWidth = 1/zoom;
+  for (let x=0;x<world.w;x+=32) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,world.h); ctx.stroke(); }
+  for (let y=0;y<world.h;y+=32) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(world.w,y); ctx.stroke(); }
+
+  ctx.strokeStyle = 'rgba(255,120,90,0.5)';
+  ctx.lineWidth = 4/zoom;
+  ctx.strokeRect(2,2,world.w-4,world.h-4);
+
+  latestState.food.forEach(f => {
+    ctx.fillStyle = f.hue;
+    ctx.beginPath(); ctx.arc(f.x,f.y,f.r,0,Math.PI*2); ctx.fill();
+  });
+
+  latestState.players.forEach(p => {
+    if (p.alive && p.segs.length) drawWorm(p.segs, p.angle, p.color, p.segs.length*2);
+  });
+
+  ctx.restore();
+}
+
+function renderLeaderboard() {
+  const rows = latestState.players.map(p => ({
+    name: p.id === myId ? 'You' : p.name,
+    color: p.color, len: p.segs.length*2, alive: p.alive, isMe: p.id === myId,
+  })).sort((a,b) => b.len - a.len).slice(0, 8);
+  document.getElementById('lbRows').innerHTML = rows.map(r => `
+    <div class="row ${r.isMe ? 'me' : ''}">
+      <span><span class="swatch" style="background:${r.color}"></span>${r.name}${r.alive ? '' : ' ✕'}</span>
+      <span>${r.len}</span>
+    </div>
+  `).join('');
+  const m = me();
+  if (m) lenValEl.textContent = m.segs.length * 2;
+}
+
+function loop() {
+  sendInput();
+  updateCamera();
+  draw();
+  renderLeaderboard();
+  requestAnimationFrame(loop);
+}
+
+connect();
+loop();
+</script>
+</body>
+</html>
